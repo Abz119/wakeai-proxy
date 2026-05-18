@@ -25,7 +25,6 @@ RATE_WINDOW = 60
 def check_rate_limit(user_id: str) -> bool:
     now = time.time()
     requests = rate_limit_store[user_id]
-    # Remove requests older than the window
     rate_limit_store[user_id] = [t for t in requests if now - t < RATE_WINDOW]
     if len(rate_limit_store[user_id]) >= RATE_LIMIT:
         return False
@@ -40,17 +39,17 @@ async def health():
 async def chat(request: Request):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=500, detail="API key not configured")
-    
+
     body = await request.json()
-    
-    # Rate limiting — use user ID from request body or fall back to IP
-    user_id = body.get("user_id") or request.client.host
+
+    # Extract user_id for rate limiting then remove before forwarding to Anthropic
+    user_id = body.pop("user_id", None) or request.client.host
     if not check_rate_limit(user_id):
         raise HTTPException(
             status_code=429,
             detail="Too many requests. Please wait a moment before sending another message."
         )
-    
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             ANTHROPIC_URL,
@@ -61,5 +60,5 @@ async def chat(request: Request):
             },
             json=body
         )
-    
+
     return response.json()
