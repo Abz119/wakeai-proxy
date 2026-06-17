@@ -48,6 +48,16 @@ def verify_token_log_only(request: Request) -> None:
         return
 
     token = parts[1]
+
+    # Diagnostic: log the token's UNVERIFIED header so we can see the actual
+    # signing algorithm (e.g. ES256/RS256 vs HS256). This does not verify the
+    # signature — it only reads the header — and never blocks the request.
+    try:
+        header = jwt.get_unverified_header(token)
+        logger.info("JWT log-only: token alg: %s (header: %s)", header.get("alg"), header)
+    except Exception as exc:
+        logger.info("JWT log-only: could not read token header (%s)", type(exc).__name__)
+
     if not SUPABASE_JWT_SECRET:
         logger.warning("JWT log-only: token present but SUPABASE_JWT_SECRET not set — cannot verify")
         return
