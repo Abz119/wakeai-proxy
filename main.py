@@ -5,6 +5,7 @@ import os
 import time
 import logging
 import jwt
+from jwt import PyJWKClient
 from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO)
@@ -23,11 +24,23 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 # Supabase JWT verification (LOG-ONLY mode — verify and log, never reject yet).
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
-if not SUPABASE_JWT_SECRET:
+# Supabase signs tokens with ES256 (asymmetric), so we verify against the project's
+# public keys served at its JWKS endpoint. Configure via either the full JWKS URL or
+# the project ref. PyJWKClient is created once and caches keys internally.
+SUPABASE_JWKS_URL = os.environ.get("SUPABASE_JWKS_URL")
+SUPABASE_PROJECT_REF = os.environ.get("SUPABASE_PROJECT_REF")
+if not SUPABASE_JWKS_URL and SUPABASE_PROJECT_REF:
+    SUPABASE_JWKS_URL = (
+        f"https://{SUPABASE_PROJECT_REF}.supabase.co/auth/v1/.well-known/jwks.json"
+    )
+
+jwks_client = None
+if SUPABASE_JWKS_URL:
+    jwks_client = PyJWKClient(SUPABASE_JWKS_URL)
+else:
     logger.warning(
-        "SUPABASE_JWT_SECRET is not set — JWT verification will be skipped "
-        "(log-only mode still active, requests are NOT blocked)."
+        "Neither SUPABASE_JWKS_URL nor SUPABASE_PROJECT_REF is set — JWT verification "
+        "will be skipped (log-only mode still active, requests are NOT blocked)."
     )
 
 
@@ -58,15 +71,16 @@ def verify_token_log_only(request: Request) -> None:
     except Exception as exc:
         logger.info("JWT log-only: could not read token header (%s)", type(exc).__name__)
 
-    if not SUPABASE_JWT_SECRET:
-        logger.warning("JWT log-only: token present but SUPABASE_JWT_SECRET not set — cannot verify")
+    if jwks_client is None:
+        logger.warning("JWT log-only: token present but JWKS not configured — cannot verify")
         return
 
     try:
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
         claims = jwt.decode(
             token,
-            SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
+            signing_key.key,
+            algorithms=["ES256"],
             audience="authenticated",
             leeway=30,
         )
@@ -75,6 +89,9 @@ def verify_token_log_only(request: Request) -> None:
         logger.info("JWT log-only: token verification FAILED — expired")
     except jwt.InvalidTokenError as exc:
         logger.info("JWT log-only: token verification FAILED — invalid (%s)", type(exc).__name__)
+    except Exception as exc:
+        # PyJWKClient can raise on JWKS fetch / kid lookup failures; stay non-blocking.
+        logger.info("JWT log-only: token verification FAILED — jwks error (%s)", type(exc).__name__)
 
 # Rate limiting — 10 requests per minute per user
 rate_limit_store = defaultdict(list)
